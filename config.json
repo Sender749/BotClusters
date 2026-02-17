@@ -2,15 +2,15 @@
     "clusters": [
         {
             "name": "CLUSTER_01",
-            "details": "["Shuffler", "https://github.com/Sender749/Updated-Shuffler", "main", "bot.py", {"PORT": "8000"}]"
+            "details": "${CLUSTER_01}"
         },
         {
             "name": "CLUSTER_02",
-            "details": "["Renamer", "https://github.com/Sender749/2GB-renamebot", "main", "bot.py", {"PORT": "8000"}]"
+            "details": "${CLUSTER_02}"
         },
         {
             "name": "CLUSTER_03",
-            "details": "["autocaption", "https://github.com/Sender749/New-captionbot", "main", "bot.py", {"PORT": "8000"}]"
+            "details": "${CLUSTER_03}"
         },
         {
             "name": "CLUSTER_04",
