@@ -118,7 +118,7 @@ def load_config(file_path):
                 # Set run_command to "dockerfile" to build & run via the repo's Dockerfile.
                 # Any other value is treated as a Python/shell file path (original behaviour).
                 "run_command": details[3],
-                "env": details[4] if len(details) > 4 and isinstance(details[4], dict) else {},
+                "env": {k.strip(): str(v).strip() for k, v in details[4].items()} if len(details) > 4 and isinstance(details[4], dict) else {},  # strip spaces from keys/values
                 "python_version": details[5] if len(details) > 5 else None,
                 "cron": cron_value,  # Bug fix: was computed but never saved
             })
