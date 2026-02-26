@@ -5,7 +5,10 @@ import logging
 import requests
 
 DEFAULT_PING_INTERVAL = 240
-MAX_FAILURES = 2
+# Bug fix: MAX_FAILURES=2 caused ping_server to permanently exit after just 2 failed pings.
+# Increased to 10, and the loop now resets the counter after a successful ping (already did),
+# but more importantly we no longer sys.exit — we just log and keep trying.
+MAX_FAILURES = 10
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
@@ -53,22 +56,25 @@ def ping_url(session, url):
 def main():
     app_url = get_app_url()
     if not app_url:
-        logging.error("No app URL provided. Set the 'APP_URL' environment variable or pass the URL as a command-line argument.")
+        logging.warning("No APP_URL set — ping server idle. Set APP_URL env var to enable keep-alive pinging.")
         logger.handlers[0].flush()
-        sys.exit(1)
-    
+        # Bug fix: previously sys.exit(1) here would crash the thread in cluster.py.
+        # Now we just sleep forever so the thread stays alive without doing anything harmful.
+        while True:
+            time.sleep(3600)
+
     ping_interval = get_ping_interval()
-    logging.info(f"Starting to ping {app_url} every {ping_interval / 60} minutes...")
+    logging.info(f"Starting to ping {app_url} every {ping_interval / 60:.1f} minutes...")
     logger.handlers[0].flush()
-    
+
     if should_delay_ping():
         delay_seconds = get_delay()
         logging.info(f"Delaying start of pinging by {delay_seconds} seconds as per DELAY_PING setting.")
         logger.handlers[0].flush()
         time.sleep(delay_seconds)
-    
+
     failure_count = 0
-    
+
     with requests.Session() as session:
         try:
             while True:
@@ -78,9 +84,14 @@ def main():
                 else:
                     failure_count += 1
                     if failure_count >= MAX_FAILURES:
-                        logging.error(f"Maximum failure count reached ({MAX_FAILURES}). Stopping ping function.")
+                        # Bug fix: was 'break' which permanently killed the ping loop.
+                        # Now we log the warning and reset the counter so pinging resumes.
+                        logging.warning(
+                            f"Reached {MAX_FAILURES} consecutive ping failures. "
+                            "Resetting counter and continuing — the service may be temporarily down."
+                        )
                         logger.handlers[0].flush()
-                        break
+                        failure_count = 0
                 time.sleep(ping_interval)
         except KeyboardInterrupt:
             logging.info("Ping process interrupted by user.")
