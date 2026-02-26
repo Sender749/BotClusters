@@ -105,6 +105,9 @@ def load_config(file_path):
 
             prefix = generate_prefix()
             cluster_name = f"{prefix} {cluster['name']}"
+
+            # Bug fix: cron_value was computed here but never stored in the cluster dict,
+            # so cron-based restarts silently did nothing. Now stored as "cron" key.
             cron_value = details[6] if len(details) > 6 else cluster.get("cron", None)
 
             clusters.append({
@@ -112,9 +115,12 @@ def load_config(file_path):
                 "bot_number": f"{prefix} {details[0]}",
                 "git_url": details[1],
                 "branch": details[2],
+                # Set run_command to "dockerfile" to build & run via the repo's Dockerfile.
+                # Any other value is treated as a Python/shell file path (original behaviour).
                 "run_command": details[3],
                 "env": details[4] if len(details) > 4 and isinstance(details[4], dict) else {},
                 "python_version": details[5] if len(details) > 5 else None,
+                "cron": cron_value,  # Bug fix: was computed but never saved
             })
 
         except json.JSONDecodeError:
@@ -142,7 +148,7 @@ def _is_docker_mode(cluster: dict) -> bool:
     return cluster.get("run_command", "").strip().lower() == "dockerfile"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# supervisord config writer (original, for Python bots)
+# supervisord config writer — Python bots
 # ─────────────────────────────────────────────────────────────────────────────
 
 def write_supervisord_config(cluster, command):
@@ -157,6 +163,8 @@ autorestart=true
 startretries=12
 stderr_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_err.log
 stdout_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_out.log
+stderr_logfile_maxbytes=5MB
+stdout_logfile_maxbytes=5MB
 {f"environment={env_vars}" if env_vars else ""}""".strip()
     config_path.write_text(config_content)
     logging.info(f"Supervisord configuration for {cluster['bot_number']} written successfully.")
@@ -195,7 +203,7 @@ def _prepare_bot_dir(cluster):
             subprocess.run(pip_command, check=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NEW: Docker bot helpers
+# Docker bot helpers (NEW)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _prepare_docker_bot_dir(cluster) -> Path:
@@ -234,19 +242,26 @@ def _build_docker_image(cluster, bot_dir: Path) -> str:
 
 def _write_docker_supervisord_config(cluster, image_name: str):
     """
-    Write a supervisord program config whose command is `docker run …`.
+    Write a supervisord program config whose command is `docker run ...`.
 
     Env vars from the cluster config are forwarded to the container with -e.
-    supervisord's autorestart handles container crashes, just like Python bots.
+    supervisord autorestart handles container crashes, just like Python bots.
+
+    Bug fix: added stopasgroup=true and killasgroup=true so that when supervisord
+    stops this program, it also kills the `docker run` child process (the container).
+    Without these, stopping a Docker bot left an orphaned running container.
     """
     safe_name = cluster['bot_number'].replace(' ', '_')
     config_path = Path(SUPERVISORD_CONF_DIR) / f"{safe_name}.conf"
 
-    # Build -e KEY=VALUE flags
-    env_flags = " ".join(f'-e {k}="{v}"' for k, v in cluster.get('env', {}).items())
+    # Build -e KEY=VALUE flags — values are shell-quoted to handle spaces/special chars
+    import shlex
+    env_flags = " ".join(
+        f"-e {shlex.quote(f'{k}={v}')}" for k, v in cluster.get('env', {}).items()
+    )
 
-    # --rm        : auto-remove container on exit so supervisord can re-run it cleanly
-    # --name      : predictable name for `docker ps` / `docker logs`
+    # --rm  : auto-remove container on exit so supervisord can re-run it cleanly
+    # --name: predictable name for `docker ps` / `docker logs`
     docker_cmd = f"docker run --rm --name {safe_name} {env_flags} {image_name}".strip()
 
     config_content = f"""[program:{safe_name}]
@@ -254,14 +269,18 @@ command={docker_cmd}
 autostart=true
 autorestart=true
 startretries=12
+stopasgroup=true
+killasgroup=true
 stderr_logfile=/var/log/supervisor/{safe_name}_err.log
-stdout_logfile=/var/log/supervisor/{safe_name}_out.log""".strip()
+stdout_logfile=/var/log/supervisor/{safe_name}_out.log
+stderr_logfile_maxbytes=5MB
+stdout_logfile_maxbytes=5MB""".strip()
 
     config_path.write_text(config_content)
     logging.info(f"Docker supervisord config written for {cluster['bot_number']} at {config_path}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# start_bot — extended to handle both modes
+# start_bot — handles both Python and Docker modes
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def start_bot(cluster):
@@ -269,14 +288,12 @@ async def start_bot(cluster):
     loop = asyncio.get_event_loop()
 
     if _is_docker_mode(cluster):
-        # ── Docker path ──────────────────────────────────────────────────────
-        logging.info(f'{cluster["bot_number"]} → Docker mode (will build & run via Dockerfile)')
+        logging.info(f'{cluster["bot_number"]} → Docker mode (building & running via Dockerfile)')
         bot_dir = await loop.run_in_executor(None, _prepare_docker_bot_dir, cluster)
         image_name = await loop.run_in_executor(None, _build_docker_image, cluster, bot_dir)
         _write_docker_supervisord_config(cluster, image_name)
 
     else:
-        # ── Original Python path (unchanged) ─────────────────────────────────
         bot_dir = Path('/app') / cluster['bot_number'].replace(" ", "_")
         venv_dir = bot_dir / 'venv'
         bot_file = bot_dir / cluster['run_command']
@@ -297,7 +314,7 @@ async def start_bot(cluster):
         write_supervisord_config(cluster, command)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rest of file — unchanged
+# supervisorctl helpers and main loop (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def async_supervisorctl(command):
