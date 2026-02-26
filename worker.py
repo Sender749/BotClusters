@@ -154,16 +154,26 @@ def _is_docker_mode(cluster: dict) -> bool:
 def write_supervisord_config(cluster, command):
     config_path = Path(SUPERVISORD_CONF_DIR) / f"{cluster['bot_number'].replace(' ', '_')}.conf"
     logging.info(f"Writing supervisord configuration for {cluster['bot_number']} at {config_path}")
-    env_vars = ','.join([f'{key}="{value}"' for key, value in cluster['env'].items()]) if cluster['env'] else ""
-    config_content = f"""[program:{cluster['bot_number'].replace(' ', '_')}]
+    safe_name = cluster['bot_number'].replace(' ', '_')
+    # Escape values for supervisord environment format:
+    # supervisord requires commas inside values to be percent-encoded (%2C)
+    # to avoid misinterpretation as environment variable separators.
+    def _escape_supervisord_value(v):
+        return str(v).replace('%', '%%').replace('"', '\"').replace(',', '%%2C')
+    env_vars = ','.join([
+        f'{key}="{_escape_supervisord_value(value)}"'
+        for key, value in cluster['env'].items()
+    ]) if cluster['env'] else ""
+    config_content = f"""[program:{safe_name}]
 command={command}
-directory=/app/{cluster['bot_number'].replace(' ', '_')}
+directory=/app/{safe_name}
 autostart=true
 autorestart=true
 startretries=12
-stderr_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_err.log
-stdout_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_out.log
-stderr_logfile_maxbytes=5MB
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/{safe_name}_out.log
 stdout_logfile_maxbytes=5MB
 {f"environment={env_vars}" if env_vars else ""}""".strip()
     config_path.write_text(config_content)
