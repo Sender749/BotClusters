@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  bot-deployer:
+    build: .
+    ports:
+      - "5000:5000"
+
+    # ── Mount the host Docker socket so the deployer can build/run bot images ──
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - bot_data:/app
+
+    environment:
+      # ── Python bot (original way) ──────────────────────────────────────────
+      # Format: ["botXX", "git_url", "branch", "run_file.py", {"ENV_KEY":"val"}]
+      # - CLUSTER_01=["bot01","https://github.com/you/pybot","main","bot.py",{"BOT_TOKEN":"xxx"}]
+
+      # ── Docker bot (NEW) ───────────────────────────────────────────────────
+      # Set run_command to "dockerfile" — the repo must have a Dockerfile at root
+      # Format: ["botXX", "git_url", "branch", "dockerfile", {"ENV_KEY":"val"}]
+      - CLUSTER_01=["bot01","https://github.com/youruser/your-dockerized-bot","main","dockerfile",{"BOT_TOKEN":"your_token","API_ID":"123","API_HASH":"abc"}]
+
+      # Mix and match freely:
+      # - CLUSTER_02=["bot02","https://github.com/youruser/plain-pybot","main","main.py",{"BOT_TOKEN":"yyy"}]
+
+    restart: unless-stopped
+
+volumes:
+  bot_data:
