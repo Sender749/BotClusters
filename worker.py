@@ -53,7 +53,7 @@ def run_with_pyenv(version, command_args, **kwargs):
     env["PYENV_VERSION"] = version
     kwargs["env"] = env
     return subprocess.run(command_args, **kwargs)
-    
+
 def validate_config(clusters):
     required_keys = ['bot_number', 'git_url', 'branch', 'run_command']
     seen_bot_suffixes = set()
@@ -82,10 +82,10 @@ def validate_config(clusters):
 
     logging.info("Configuration validation successful.")
     return True
-    
+
 def load_config(file_path):
     logging.info(f'Loading configuration from {file_path}')
-    
+
     try:
         with open(file_path, "r") as jsonfile:
             config = json.load(jsonfile)
@@ -96,7 +96,7 @@ def load_config(file_path):
     clusters = []
     for cluster in config.get('clusters', []):
         details_str = os.getenv(cluster['name'], '{}')
-        
+
         try:
             details = json.loads(details_str)
             if not isinstance(details, list) or len(details) < 4:
@@ -129,35 +129,52 @@ def load_config(file_path):
 load_dotenv('cluster.env', override=True)
 clusters = load_config("config.json")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _docker_image_name(bot_number: str) -> str:
+    """Convert bot_number into a valid lowercase Docker image tag."""
+    return re.sub(r'[^a-z0-9_.-]', '-', bot_number.lower()).strip('-')
+
+def _is_docker_mode(cluster: dict) -> bool:
+    """Return True when run_command is the special keyword 'dockerfile'."""
+    return cluster.get("run_command", "").strip().lower() == "dockerfile"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# supervisord config writer (original, for Python bots)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def write_supervisord_config(cluster, command):
     config_path = Path(SUPERVISORD_CONF_DIR) / f"{cluster['bot_number'].replace(' ', '_')}.conf"
     logging.info(f"Writing supervisord configuration for {cluster['bot_number']} at {config_path}")
     env_vars = ','.join([f'{key}="{value}"' for key, value in cluster['env'].items()]) if cluster['env'] else ""
-    cron_line = f"cron={cluster['cron']}" if cluster.get('cron') else ""
-    config_content = f"""
-    [program:{cluster['bot_number'].replace(' ', '_')}]
-    command={command}
-    directory=/app/{cluster['bot_number'].replace(' ', '_')}
-    autostart=true
-    autorestart=true
-    startretries=12
-    stderr_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_err.log
-    stdout_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_out.log
-    {f"environment={env_vars}" if env_vars else ""}
-    """
-    config_path.write_text(config_content.strip())
+    config_content = f"""[program:{cluster['bot_number'].replace(' ', '_')}]
+command={command}
+directory=/app/{cluster['bot_number'].replace(' ', '_')}
+autostart=true
+autorestart=true
+startretries=12
+stderr_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_err.log
+stdout_logfile=/var/log/supervisor/{cluster['bot_number'].replace(' ', '_')}_out.log
+{f"environment={env_vars}" if env_vars else ""}""".strip()
+    config_path.write_text(config_content)
     logging.info(f"Supervisord configuration for {cluster['bot_number']} written successfully.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python bot: clone + venv (original, unchanged)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _prepare_bot_dir(cluster):
     bot_dir = Path('/app') / cluster['bot_number'].replace(" ", "_")
     venv_dir = bot_dir / 'venv'
     requirements_file = bot_dir / 'requirements.txt'
     branch = cluster.get('branch', 'main')
-    
+
     if bot_dir.exists():
         logging.info(f'Removing existing directory: {bot_dir}')
         shutil.rmtree(bot_dir)
-    
+
     logging.info(f'Cloning {cluster["bot_number"]} from {cluster["git_url"]} (branch: {branch})')
     subprocess.run(['git', 'clone', '-b', branch, '--single-branch', cluster['git_url'], str(bot_dir)], check=True)
     version = cluster.get("python_version")
@@ -165,7 +182,7 @@ def _prepare_bot_dir(cluster):
         python_executable = get_pyenv_python(version)
     else:
         python_executable = shutil.which("python3") or "python3"
-        
+
     if requirements_file.exists():
         logging.info(f'Creating virtual environment for {cluster["bot_number"]} using {python_executable}')
         if version:
@@ -173,30 +190,115 @@ def _prepare_bot_dir(cluster):
             pip_command = [str(venv_dir / 'bin' / 'pip'), 'install', '--no-cache-dir', '-r', str(requirements_file)]
             run_with_pyenv(version, pip_command, check=True)
         else:
-             subprocess.run([python_executable, '-m', 'venv', str(venv_dir)], check=True)
-             pip_command = [str(venv_dir / 'bin' / 'pip'), 'install', '--no-cache-dir', '-r', str(requirements_file)]
-             subprocess.run(pip_command, check=True)
-                
+            subprocess.run([python_executable, '-m', 'venv', str(venv_dir)], check=True)
+            pip_command = [str(venv_dir / 'bin' / 'pip'), 'install', '--no-cache-dir', '-r', str(requirements_file)]
+            subprocess.run(pip_command, check=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: Docker bot helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _prepare_docker_bot_dir(cluster) -> Path:
+    """Clone the repo and verify a Dockerfile exists at its root."""
+    bot_dir = Path('/app') / cluster['bot_number'].replace(" ", "_")
+    branch = cluster.get('branch', 'main')
+
+    if bot_dir.exists():
+        logging.info(f'Removing existing directory: {bot_dir}')
+        shutil.rmtree(bot_dir)
+
+    logging.info(f'Cloning (docker mode) {cluster["bot_number"]} from {cluster["git_url"]} (branch: {branch})')
+    subprocess.run(
+        ['git', 'clone', '-b', branch, '--single-branch', cluster['git_url'], str(bot_dir)],
+        check=True
+    )
+
+    if not (bot_dir / 'Dockerfile').exists():
+        raise FileNotFoundError(
+            f"Dockerfile not found in cloned repo at {bot_dir}. "
+            "Make sure your bot repo has a Dockerfile at its root, "
+            "or change run_command away from 'dockerfile'."
+        )
+
+    return bot_dir
+
+
+def _build_docker_image(cluster, bot_dir: Path) -> str:
+    """docker build -t <image_name> <bot_dir>  →  returns image_name."""
+    image_name = _docker_image_name(cluster['bot_number'])
+    logging.info(f"Building Docker image '{image_name}' for {cluster['bot_number']}")
+    subprocess.run(['docker', 'build', '-t', image_name, str(bot_dir)], check=True)
+    logging.info(f"Docker image '{image_name}' built successfully.")
+    return image_name
+
+
+def _write_docker_supervisord_config(cluster, image_name: str):
+    """
+    Write a supervisord program config whose command is `docker run …`.
+
+    Env vars from the cluster config are forwarded to the container with -e.
+    supervisord's autorestart handles container crashes, just like Python bots.
+    """
+    safe_name = cluster['bot_number'].replace(' ', '_')
+    config_path = Path(SUPERVISORD_CONF_DIR) / f"{safe_name}.conf"
+
+    # Build -e KEY=VALUE flags
+    env_flags = " ".join(f'-e {k}="{v}"' for k, v in cluster.get('env', {}).items())
+
+    # --rm        : auto-remove container on exit so supervisord can re-run it cleanly
+    # --name      : predictable name for `docker ps` / `docker logs`
+    docker_cmd = f"docker run --rm --name {safe_name} {env_flags} {image_name}".strip()
+
+    config_content = f"""[program:{safe_name}]
+command={docker_cmd}
+autostart=true
+autorestart=true
+startretries=12
+stderr_logfile=/var/log/supervisor/{safe_name}_err.log
+stdout_logfile=/var/log/supervisor/{safe_name}_out.log""".strip()
+
+    config_path.write_text(config_content)
+    logging.info(f"Docker supervisord config written for {cluster['bot_number']} at {config_path}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# start_bot — extended to handle both modes
+# ─────────────────────────────────────────────────────────────────────────────
+
 async def start_bot(cluster):
     logging.info(f'Starting bot: {cluster["bot_number"]}')
-    bot_dir = Path('/app') / cluster['bot_number'].replace(" ", "_")
-    venv_dir = bot_dir / 'venv'
-    bot_file = bot_dir / cluster['run_command']
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _prepare_bot_dir, cluster)
 
-    python_executable = venv_dir / 'bin' / 'python3'
-    if cluster.get('python_version'):
-        python_executable = venv_dir / 'bin' / f'python{cluster["python_version"]}'
+    if _is_docker_mode(cluster):
+        # ── Docker path ──────────────────────────────────────────────────────
+        logging.info(f'{cluster["bot_number"]} → Docker mode (will build & run via Dockerfile)')
+        bot_dir = await loop.run_in_executor(None, _prepare_docker_bot_dir, cluster)
+        image_name = await loop.run_in_executor(None, _build_docker_image, cluster, bot_dir)
+        _write_docker_supervisord_config(cluster, image_name)
 
-    if bot_file.suffix == ".sh":
-        command = f"bash {bot_file}"
-    elif bot_file.suffix == ".py":
-        command = f"{python_executable} {bot_file}"
     else:
-        command = f"{python_executable} -m {bot_file.stem}"
+        # ── Original Python path (unchanged) ─────────────────────────────────
+        bot_dir = Path('/app') / cluster['bot_number'].replace(" ", "_")
+        venv_dir = bot_dir / 'venv'
+        bot_file = bot_dir / cluster['run_command']
 
-    write_supervisord_config(cluster, command)
+        await loop.run_in_executor(None, _prepare_bot_dir, cluster)
+
+        python_executable = venv_dir / 'bin' / 'python3'
+        if cluster.get('python_version'):
+            python_executable = venv_dir / 'bin' / f'python{cluster["python_version"]}'
+
+        if bot_file.suffix == ".sh":
+            command = f"bash {bot_file}"
+        elif bot_file.suffix == ".py":
+            command = f"{python_executable} {bot_file}"
+        else:
+            command = f"{python_executable} -m {bot_file.stem}"
+
+        write_supervisord_config(cluster, command)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rest of file — unchanged
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def async_supervisorctl(command):
     proc = await asyncio.create_subprocess_shell(
@@ -252,11 +354,11 @@ async def wait_for_process_stop(bot_conf_name, timeout=30, interval=2):
 async def stop_bot(bot_number):
     logging.info(f"Stopping bot: {bot_number}")
     bot_conf_name = bot_number.replace(" ", "_")
-    
+
     await async_supervisorctl(f"supervisorctl stop {bot_conf_name}")
     if not await wait_for_process_stop(bot_conf_name):
         logging.warning(f"Process {bot_conf_name} did not stop within timeout.")
-    
+
     conf_path = Path(SUPERVISORD_CONF_DIR) / f"{bot_conf_name}.conf"
     if conf_path.exists():
         conf_path.unlink()
