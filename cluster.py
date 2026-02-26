@@ -7,8 +7,13 @@ def run_update():
     subprocess.run(["python3", "update.py"])
 
 def run_gunicorn():
-    port = os.environ.get("PORT", 5000)
-    subprocess.run(["gunicorn", "-w", "1", "-k", "eventlet", "-b", f"0.0.0.0:{os.environ.get('PORT', '5000')}", "run:app"], check=True)
+    # Bug fix: 'port' variable was defined but never used - the f-string read PORT again directly.
+    # Now consistently read once and use in binding.
+    port = os.environ.get("PORT", "5000")
+    subprocess.run(
+        ["gunicorn", "-w", "1", "-k", "eventlet", "-b", f"0.0.0.0:{port}", "run:app"],
+        check=True
+    )
 
 def run_supervisord():
     subprocess.run(["supervisord", "-n", "-c", "supervisord.conf"])
